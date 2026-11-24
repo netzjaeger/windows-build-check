@@ -12,6 +12,12 @@ name: Windows build check (private sources)
 
 on:
   workflow_dispatch:
+    inputs:
+      code_ref:
+        description: 'Branch or tag of the code repo to build (default main), to test a change before it is merged'
+        required: false
+        type: string
+        default: main
 
 permissions:
   contents: read
@@ -49,6 +55,7 @@ jobs:
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           repository: ${{ env.SOURCE_REPO }}
+          ref: ${{ inputs.code_ref || 'main' }}
           token: ${{ secrets.PRIVATE_READ_PAT }}
           path: code-src
           sparse-checkout: voidcore
@@ -77,6 +84,25 @@ jobs:
           echo "test and build exit code: $rc"
           echo "test suites ok: $(grep -c '^test result: ok' "$log"), failed: $(grep -c '^test result: FAILED' "$log")"
           exit $rc
+
+      - name: Self-test on Windows (quiet, read-only apart from one firewall rule it removes again)
+        timeout-minutes: 8
+        shell: bash
+        working-directory: code-src/voidcore
+        run: |
+          log="$RUNNER_TEMP/build.log"
+          cargo build --locked --release -p voidcore-service --features selftest --target-dir target-selftest >> "$log" 2>&1 && brc=0 || brc=$?
+          echo "selftest build exit code: $brc"
+          [ $brc -eq 0 ] || exit $brc
+          out="$RUNNER_TEMP/selftest.txt"
+          target-selftest/release/voidcore-service.exe --selftest > "$out" 2>&1 && src=0 || src=$?
+          cat "$out" >> "$log"
+          echo "selftest exit code: $src"
+          grep -E '^SELFTEST ' "$out" || echo "SELFTEST produced no summary"
+          # only the NAMES of checks that failed or were skipped are shown here; the reasons are in the encrypted log
+          grep -E '^(FAIL|SKIP) ' "$out" | cut -d: -f1 || true
+          rm -f "$out"
+          exit $src
 
       - name: Sign with a throwaway key (quiet)
         shell: bash
