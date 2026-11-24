@@ -18,6 +18,11 @@ on:
         required: false
         type: string
         default: main
+      test_policy:
+        description: 'Also build three VM test variants of the service with a test firewall policy baked in (good, bad, audit); needs keep_binaries'
+        required: false
+        type: boolean
+        default: false
       keep_binaries:
         description: 'Also keep the built programs, encrypted with LOG_KEY, as a one-day artifact (for a VM test)'
         required: false
@@ -131,6 +136,32 @@ jobs:
             && echo "signing: ok" || { echo "signing: FAILED"; exit 1; }
           echo "signature files: $(ls target/release/*.sig | wc -l)"
 
+      - name: Build the VM test variants of the service (test policy baked in, quiet)
+        if: ${{ inputs.test_policy }}
+        shell: bash
+        working-directory: code-src/voidcore
+        run: |
+          log="$RUNNER_TEMP/build.log"
+          vm="$RUNNER_TEMP/vmpack"
+          mkdir -p "$vm"
+          for variant in good bad audit; do
+            d="$RUNNER_TEMP/vmcfg-$variant"
+            mkdir -p "$d"
+            printf 'notepad\n' > "$d/whitelist.txt"
+            printf 'blocked.example\n' > "$d/blocklist.txt"
+            printf 'Example Corp\n' > "$d/trusted-publishers.txt"
+            mode=enforce
+            update='C:\\voidcore-test\\voidcore-service.exe'
+            ps='C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe'
+            [ "$variant" = bad ] && update='C:\\nonexistent\\updater.exe'
+            [ "$variant" = audit ] && mode=audit
+            # %s arguments are passed through untouched: neither sed nor ${var//a/b} keeps a doubled backslash, and JSON needs it
+            printf '{"v":1,"firewall":{"mode":"%s","default_outbound":"block","dns_service":"Dnscache","dns_resolvers":["10.0.2.3"],"update_program":"%s","update_ports":[443],"allow_programs":[{"path":"%s","ports":[8765]}],"block_remote_ips":["1.1.1.1","8.8.8.8"],"block_doh_ports":[443],"block_dot_ports":[853],"probe_host":"api.github.com"}}\n' "$mode" "$update" "$ps" > "$d/windows-policy.json"
+            VOIDCORE_CONFIG_DIR="$d" cargo build --locked --release -p voidcore-service --target-dir target-vm >> "$log" 2>&1 || { echo "vm variant $variant: build FAILED"; exit 1; }
+            cp target-vm/release/voidcore-service.exe "$vm/voidcore-service-vm-$variant.exe"
+            echo "vm variant $variant: built"
+          done
+
       - name: Keep the built programs for a VM test (encrypted, one day)
         if: ${{ inputs.keep_binaries }}
         shell: bash
@@ -140,6 +171,7 @@ jobs:
           mkdir -p "$pack"
           cp target/release/voidcore-service.exe target/release/voidcore-gui.exe "$pack/"
           cp target-selftest/release/voidcore-service.exe "$pack/voidcore-service-selftest.exe"
+          [ -d "$RUNNER_TEMP/vmpack" ] && cp "$RUNNER_TEMP"/vmpack/*.exe "$pack/"
           # relative paths: GNU tar reads "D:\a\_temp\x.tar" as a file on a remote host called "D"
           cd "$RUNNER_TEMP"
           tar -cf pack.tar -C pack .
