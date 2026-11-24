@@ -34,6 +34,8 @@ concurrency:
 env:
   VAULT_REPO: netzjaeger/Secure-Armory
   SOURCE_REPO: netzjaeger/Omnishield
+  # Link the C runtime statically: a clean Windows has no vcruntime140.dll, and a program that needs it does not even start.
+  RUSTFLAGS: "-C target-feature=+crt-static"
 
 jobs:
   build:
@@ -108,6 +110,17 @@ jobs:
           grep -E '^(FAIL|SKIP) ' "$out" | cut -d: -f1 || true
           rm -f "$out"
           exit $src
+
+      - name: Check that no program needs the Visual C++ runtime
+        shell: bash
+        working-directory: code-src/voidcore
+        run: |
+          bad=0
+          for f in target/release/voidcore-service.exe target/release/voidcore-gui.exe target-selftest/release/voidcore-service.exe; do
+            if grep -q -a -i 'vcruntime140' "$f"; then echo "needs VCRUNTIME140: $(basename "$f")"; bad=1; fi
+          done
+          [ $bad -eq 0 ] && echo "static C runtime: ok (no VCRUNTIME140 import)"
+          exit $bad
 
       - name: Sign with a throwaway key (quiet)
         shell: bash
