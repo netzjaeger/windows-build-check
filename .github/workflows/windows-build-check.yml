@@ -1,0 +1,106 @@
+name: Windows build check (private sources)
+
+# This repository is public and holds only this file. The sources and the build scripts are in two PRIVATE repositories, read with a
+# read-only token that exists only in the `private-build` environment (it needs your approval per run, and only for runs on main).
+#
+# PUBLIC LOGS: anyone can read this run's log, and compiler errors print source lines. So nothing from the build is ever printed:
+# all of it goes to a file, the log shows only exit codes and counts, and the full log is uploaded ENCRYPTED with a key that only you
+# hold (secret LOG_KEY). Decrypt it locally:
+#   openssl enc -d -aes-256-cbc -pbkdf2 -iter 600000 -in build.log.enc -pass env:LOG_KEY
+#
+# Nothing is published or deployed from here, there is no signing secret (a throwaway key signs), and only a manual start works.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: private-build
+  cancel-in-progress: false
+
+env:
+  VAULT_REPO: netzjaeger/Secure-Armory
+  SOURCE_REPO: netzjaeger/Omnishield
+
+jobs:
+  build:
+    if: ${{ github.ref == 'refs/heads/main' }}
+    runs-on: windows-latest
+    timeout-minutes: 60
+    environment: private-build
+    env:
+      LOG_KEY: ${{ secrets.LOG_KEY }}
+    steps:
+      - name: Require the log key (without it the log could not be kept safely)
+        shell: bash
+        run: '[ -n "$LOG_KEY" ] || { echo "::error::secret LOG_KEY is not set in the private-build environment"; exit 1; }'
+
+      - name: Check out the build repo (private)
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          repository: ${{ env.VAULT_REPO }}
+          token: ${{ secrets.PRIVATE_READ_PAT }}
+          path: vault
+          persist-credentials: false
+
+      - name: Check out the code (private)
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          repository: ${{ env.SOURCE_REPO }}
+          token: ${{ secrets.PRIVATE_READ_PAT }}
+          path: code-src
+          sparse-checkout: voidcore
+          persist-credentials: false
+
+      - name: Install the pinned Rust toolchain (official archive, sha256 checked)
+        shell: bash
+        run: |
+          version="$(sed -n 's/^RUST_VERSION=//p' vault/pins/rust-builder.env)"
+          bash vault/.github/scripts/install-rust-windows.sh "$version" "$RUNNER_TEMP/rust"
+
+      - name: Put the frozen dependency lock in place
+        shell: bash
+        run: bash vault/.github/scripts/place-voidcore-pins.sh code-src vault/pins/voidcore
+
+      - name: Test and build (quiet, everything goes to the encrypted log)
+        shell: bash
+        working-directory: code-src/voidcore
+        run: |
+          log="$RUNNER_TEMP/build.log"
+          {
+            rustc --version
+            cargo test --locked -p voidcore-shared -p release-signer
+            cargo build --locked --workspace --release --exclude installer-builder
+          } > "$log" 2>&1 && rc=0 || rc=$?
+          echo "test and build exit code: $rc"
+          echo "test suites ok: $(grep -c '^test result: ok' "$log"), failed: $(grep -c '^test result: FAILED' "$log")"
+          exit $rc
+
+      - name: Sign with a throwaway key (quiet)
+        shell: bash
+        working-directory: code-src/voidcore
+        run: |
+          log="$RUNNER_TEMP/build.log"
+          target/release/release-signer.exe sign --ephemeral 1 target/release/voidcore-service.exe target/release/voidcore-gui.exe >> "$log" 2>&1 \
+            && echo "signing: ok" || { echo "signing: FAILED"; exit 1; }
+          echo "signature files: $(ls target/release/*.sig | wc -l)"
+
+      - name: Encrypt the log
+        if: ${{ always() }}
+        shell: bash
+        run: |
+          log="$RUNNER_TEMP/build.log"
+          [ -f "$log" ] && openssl enc -aes-256-cbc -pbkdf2 -iter 600000 -salt -in "$log" -out "$RUNNER_TEMP/build.log.enc" -pass env:LOG_KEY
+          rm -f "$log"
+          ls "$RUNNER_TEMP"/build.log.enc >/dev/null 2>&1 && echo "encrypted log: $(wc -c < "$RUNNER_TEMP/build.log.enc") bytes" || echo "no log was written"
+
+      - name: Keep the encrypted log for three days
+        if: ${{ always() }}
+        uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882 # v4.4.3
+        with:
+          name: build-log-encrypted
+          path: ${{ runner.temp }}/build.log.enc
+          retention-days: 3
+          if-no-files-found: ignore
