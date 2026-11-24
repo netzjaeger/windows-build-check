@@ -18,6 +18,11 @@ on:
         required: false
         type: string
         default: main
+      keep_binaries:
+        description: 'Also keep the built programs, encrypted with LOG_KEY, as a one-day artifact (for a VM test)'
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -113,6 +118,20 @@ jobs:
             && echo "signing: ok" || { echo "signing: FAILED"; exit 1; }
           echo "signature files: $(ls target/release/*.sig | wc -l)"
 
+      - name: Keep the built programs for a VM test (encrypted, one day)
+        if: ${{ inputs.keep_binaries }}
+        shell: bash
+        working-directory: code-src/voidcore
+        run: |
+          pack="$RUNNER_TEMP/pack"
+          mkdir -p "$pack"
+          cp target/release/voidcore-service.exe target/release/voidcore-gui.exe "$pack/"
+          cp target-selftest/release/voidcore-service.exe "$pack/voidcore-service-selftest.exe"
+          tar -cf "$RUNNER_TEMP/pack.tar" -C "$pack" .
+          openssl enc -aes-256-cbc -pbkdf2 -iter 600000 -salt -in "$RUNNER_TEMP/pack.tar" -out "$RUNNER_TEMP/binaries.tar.enc" -pass env:LOG_KEY
+          rm -rf "$pack" "$RUNNER_TEMP/pack.tar"
+          echo "encrypted programs: $(wc -c < "$RUNNER_TEMP/binaries.tar.enc") bytes"
+
       - name: Encrypt the log
         if: ${{ always() }}
         shell: bash
@@ -121,6 +140,15 @@ jobs:
           [ -f "$log" ] && openssl enc -aes-256-cbc -pbkdf2 -iter 600000 -salt -in "$log" -out "$RUNNER_TEMP/build.log.enc" -pass env:LOG_KEY
           rm -f "$log"
           ls "$RUNNER_TEMP"/build.log.enc >/dev/null 2>&1 && echo "encrypted log: $(wc -c < "$RUNNER_TEMP/build.log.enc") bytes" || echo "no log was written"
+
+      - name: Upload the encrypted programs (one day)
+        if: ${{ inputs.keep_binaries }}
+        uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882 # v4.4.3
+        with:
+          name: binaries-encrypted
+          path: ${{ runner.temp }}/binaries.tar.enc
+          retention-days: 1
+          if-no-files-found: error
 
       - name: Keep the encrypted log for three days
         if: ${{ always() }}
