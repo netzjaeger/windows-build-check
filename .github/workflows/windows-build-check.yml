@@ -127,10 +127,12 @@ jobs:
           mkdir -p "$pack"
           cp target/release/voidcore-service.exe target/release/voidcore-gui.exe "$pack/"
           cp target-selftest/release/voidcore-service.exe "$pack/voidcore-service-selftest.exe"
-          tar -cf "$RUNNER_TEMP/pack.tar" -C "$pack" .
-          openssl enc -aes-256-cbc -pbkdf2 -iter 600000 -salt -in "$RUNNER_TEMP/pack.tar" -out "$RUNNER_TEMP/binaries.tar.enc" -pass env:LOG_KEY
-          rm -rf "$pack" "$RUNNER_TEMP/pack.tar"
-          echo "encrypted programs: $(wc -c < "$RUNNER_TEMP/binaries.tar.enc") bytes"
+          # relative paths: GNU tar reads "D:\a\_temp\x.tar" as a file on a remote host called "D"
+          cd "$RUNNER_TEMP"
+          tar -cf pack.tar -C pack .
+          openssl enc -aes-256-cbc -pbkdf2 -iter 600000 -salt -in pack.tar -out binaries.tar.enc -pass env:LOG_KEY
+          rm -rf pack pack.tar
+          echo "encrypted programs: $(wc -c < binaries.tar.enc) bytes"
 
       - name: Encrypt the log
         if: ${{ always() }}
